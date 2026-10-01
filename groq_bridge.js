@@ -4,7 +4,6 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// Helper to get Groq API key from env or ~/.groq_key
 function getApiKey() {
     if (process.env.GROQ_API_KEY && process.env.GROQ_API_KEY.trim().startsWith('gsk_')) {
         return process.env.GROQ_API_KEY.trim();
@@ -17,6 +16,89 @@ function getApiKey() {
         } catch (e) {}
     }
     return "";
+}
+
+function convertAnthropicToOpenAI(parsed) {
+    const messages = [];
+    
+    // 1. System Prompt
+    if (parsed.system) {
+        let sysText = "";
+        if (Array.isArray(parsed.system)) {
+            sysText = parsed.system.map(s => (typeof s === 'string' ? s : (s.text || JSON.stringify(s)))).join('\n');
+        } else if (typeof parsed.system === 'string') {
+            sysText = parsed.system;
+        } else {
+            sysText = JSON.stringify(parsed.system);
+        }
+        messages.push({ role: 'system', content: sysText });
+    }
+
+    // 2. Messages & Tool Interactions
+    if (parsed.messages && Array.isArray(parsed.messages)) {
+        for (const m of parsed.messages) {
+            if (Array.isArray(m.content)) {
+                let textParts = [];
+                let toolResults = [];
+                let toolUses = [];
+
+                for (const part of m.content) {
+                    if (part.type === 'text') {
+                        textParts.push(part.text);
+                    } else if (part.type === 'tool_result') {
+                        toolResults.push({
+                            role: 'tool',
+                            tool_call_id: part.tool_use_id,
+                            content: typeof part.content === 'string' ? part.content : JSON.stringify(part.content || "")
+                        });
+                    } else if (part.type === 'tool_use') {
+                        toolUses.push({
+                            id: part.id,
+                            type: 'function',
+                            function: {
+                                name: part.name,
+                                arguments: typeof part.input === 'string' ? part.input : JSON.stringify(part.input || {})
+                            }
+                        });
+                    }
+                }
+
+                if (m.role === 'assistant') {
+                    const msg = { role: 'assistant', content: textParts.join('\n') || null };
+                    if (toolUses.length > 0) msg.tool_calls = toolUses;
+                    messages.push(msg);
+                } else if (m.role === 'user') {
+                    if (textParts.length > 0) {
+                        messages.push({ role: 'user', content: textParts.join('\n') });
+                    }
+                    for (const tr of toolResults) {
+                        messages.push(tr);
+                    }
+                }
+            } else {
+                messages.push({ role: m.role || 'user', content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content || "") });
+            }
+        }
+    }
+
+    if (messages.length === 0) {
+        messages.push({ role: 'user', content: 'hi' });
+    }
+
+    // 3. Tools definitions
+    let tools = undefined;
+    if (parsed.tools && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
+        tools = parsed.tools.map(t => ({
+            type: 'function',
+            function: {
+                name: t.name,
+                description: t.description || "",
+                parameters: t.input_schema || { type: 'object', properties: {} }
+            }
+        }));
+    }
+
+    return { messages, tools };
 }
 
 const server = http.createServer((req, res) => {
@@ -38,8 +120,6 @@ const server = http.createServer((req, res) => {
         try { parsed = JSON.parse(body); } catch(e){}
         
         let targetModel = parsed.model || "openai/gpt-oss-120b";
-        
-        // Dynamic Model Router based on Claude Code selection
         if (targetModel.includes("opus") || targetModel.includes("120b")) {
             targetModel = "openai/gpt-oss-120b";
         } else if (targetModel.includes("sonnet") || targetModel.includes("qwen")) {
@@ -48,44 +128,16 @@ const server = http.createServer((req, res) => {
             targetModel = "openai/gpt-oss-20b";
         }
 
-        const openAiMessages = [];
-        
-        // Handle System Message (Array or String)
-        if (parsed.system) {
-            let sysText = "";
-            if (Array.isArray(parsed.system)) {
-                sysText = parsed.system.map(s => (typeof s === 'string' ? s : (s.text || JSON.stringify(s)))).join('\n');
-            } else if (typeof parsed.system === 'string') {
-                sysText = parsed.system;
-            } else {
-                sysText = JSON.stringify(parsed.system);
-            }
-            openAiMessages.push({ role: 'system', content: sysText });
-        }
-        
-        // Handle User / Assistant Messages
-        if (parsed.messages && Array.isArray(parsed.messages)) {
-            for (const m of parsed.messages) {
-                let contentText = "";
-                if (Array.isArray(m.content)) {
-                    contentText = m.content.map(c => (typeof c === 'string' ? c : (c.text || JSON.stringify(c)))).join('\n');
-                } else if (typeof m.content === 'string') {
-                    contentText = m.content;
-                } else {
-                    contentText = JSON.stringify(m.content || "");
-                }
-                openAiMessages.push({ role: m.role || 'user', content: contentText });
-            }
-        }
-
-        if (openAiMessages.length === 0) {
-            openAiMessages.push({ role: 'user', content: 'hi' });
-        }
-
-        const groqPayload = JSON.stringify({
+        const { messages, tools } = convertAnthropicToOpenAI(parsed);
+        const groqPayloadObj = {
             model: targetModel,
-            messages: openAiMessages
-        });
+            messages: messages
+        };
+        if (tools && tools.length > 0) {
+            groqPayloadObj.tools = tools;
+        }
+
+        const groqPayload = JSON.stringify(groqPayloadObj);
 
         const gReq = https.request({
             hostname: 'api.groq.com',
@@ -104,15 +156,42 @@ const server = http.createServer((req, res) => {
                 let gParsed = {};
                 try { gParsed = JSON.parse(gData); } catch(e){}
                 
-                const replyText = gParsed.choices?.[0]?.message?.content || gParsed.error?.message || "No response received";
-                
+                const choice = gParsed.choices?.[0];
+                const content = [];
+                let stop_reason = "end_turn";
+
+                if (choice) {
+                    if (choice.message?.content) {
+                        content.push({ type: "text", text: choice.message.content });
+                    }
+                    if (choice.message?.tool_calls && Array.isArray(choice.message.tool_calls)) {
+                        stop_reason = "tool_use";
+                        for (const tc of choice.message.tool_calls) {
+                            let inputObj = {};
+                            try { inputObj = JSON.parse(tc.function.arguments); } catch(e){ inputObj = { raw: tc.function.arguments }; }
+                            content.push({
+                                type: "tool_use",
+                                id: tc.id,
+                                name: tc.function.name,
+                                input: inputObj
+                            });
+                        }
+                    }
+                } else if (gParsed.error) {
+                    content.push({ type: "text", text: "Groq Error: " + gParsed.error.message });
+                }
+
+                if (content.length === 0) {
+                    content.push({ type: "text", text: "No response received" });
+                }
+
                 const anthropicResp = JSON.stringify({
                     id: "msg_" + Date.now(),
                     type: "message",
                     role: "assistant",
-                    content: [{ type: "text", text: replyText }],
+                    content: content,
                     model: targetModel,
-                    stop_reason: "end_turn",
+                    stop_reason: stop_reason,
                     usage: {
                         input_tokens: gParsed.usage?.prompt_tokens || 10,
                         output_tokens: gParsed.usage?.completion_tokens || 20
