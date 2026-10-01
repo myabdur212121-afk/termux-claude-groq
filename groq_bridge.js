@@ -18,11 +18,42 @@ function getApiKey() {
     return "";
 }
 
+function cleanSchema(schema) {
+    if (!schema || typeof schema !== 'object') return { type: 'object', properties: {} };
+    const cleanProps = {};
+    if (schema.properties) {
+        for (const [k, v] of Object.entries(schema.properties)) {
+            cleanProps[k] = {
+                type: v.type || 'string',
+                description: (v.description || "").split('\n')[0].split('.')[0] || k
+            };
+            if (v.enum) cleanProps[k].enum = v.enum;
+        }
+    }
+    return {
+        type: 'object',
+        properties: cleanProps,
+        required: schema.required || []
+    };
+}
+
+function simplifyTools(tools) {
+    if (!tools || !Array.isArray(tools)) return undefined;
+    return tools.map(t => ({
+        type: 'function',
+        function: {
+            name: t.name,
+            description: (t.description || "").split('\n')[0].split('.')[0] || t.name,
+            parameters: cleanSchema(t.input_schema)
+        }
+    }));
+}
+
 function convertAnthropicToOpenAI(parsed) {
     const messages = [];
     
-    // 1. Efficient Lean System Prompt (Cuts ~15,000 boilerplate tokens down to ~100 tokens!)
-    const leanSystemPrompt = "You are an expert autonomous Linux, OpenGL, and Python systems developer running on Android Termux. Use the provided tools (Bash, etc.) to inspect, write files, debug, and complete tasks step by step.";
+    // 1. Efficient Lean System Prompt (Eliminates ~12k tokens)
+    const leanSystemPrompt = "You are an expert autonomous Linux & Python developer on Android Termux. Use tools (Bash, etc.) accurately to complete tasks.";
     messages.push({ role: 'system', content: leanSystemPrompt });
 
     // 2. Messages & Tool Interactions
@@ -38,9 +69,8 @@ function convertAnthropicToOpenAI(parsed) {
                         textParts.push(part.text);
                     } else if (part.type === 'tool_result') {
                         let resultText = typeof part.content === 'string' ? part.content : JSON.stringify(part.content || "");
-                        // Prevent output blowing up token limits
-                        if (resultText.length > 4000) {
-                            resultText = resultText.substring(0, 4000) + "\n...[output truncated for brevity]...";
+                        if (resultText.length > 2500) {
+                            resultText = resultText.substring(0, 2500) + "\n...[output truncated]...";
                         }
                         toolResults.push({
                             role: 'tool',
@@ -77,22 +107,12 @@ function convertAnthropicToOpenAI(parsed) {
         }
     }
 
-    if (messages.length === 1) { // only system present
+    if (messages.length === 1) {
         messages.push({ role: 'user', content: 'hi' });
     }
 
-    // 3. Compact Tools definitions
-    let tools = undefined;
-    if (parsed.tools && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
-        tools = parsed.tools.map(t => ({
-            type: 'function',
-            function: {
-                name: t.name,
-                description: t.description || "",
-                parameters: t.input_schema || { type: 'object', properties: {} }
-            }
-        }));
-    }
+    // 3. Compact Tools (Eliminates ~15k verbose documentation tokens down to ~300 tokens!)
+    const tools = simplifyTools(parsed.tools);
 
     return { messages, tools };
 }
