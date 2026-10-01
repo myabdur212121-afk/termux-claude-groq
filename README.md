@@ -96,8 +96,24 @@ termux-claude-groq/
 ├── groq_bridge.js     # Anthropic Messages API -> Groq Cloud স্মার্ট অনুবাদক
 ├── set-key.sh         # Groq API Key ম্যানেজমেন্ট স্ক্রিপ্ট
 ├── switch-model.sh    # টার্মিনাল মডেল সিলেক্টর
+├── docs/              # পূর্ণাঙ্গ ইঞ্জিনিয়ারিং ডকুমেন্টেশন ও ADR
+│   ├── 01_PROJECT_OVERVIEW.md
+│   ├── 02_CHRONOLOGICAL_ERRORS.md
+│   ├── 03_SYSTEM_ARCHITECTURE.md
+│   ├── 04_BACKGROUND_AGENT_GUIDE.md
+│   └── 05_GUIDE_FOR_FUTURE_AI.md
 └── README.md          # ডকুমেন্টেশন ও গাইড
 ```
+
+---
+
+## 📚 Complete Engineering Documentation (`docs/`)
+এই প্রজেক্টের পেছনে প্রতিটি সমস্যা, এরর সমাধান এবং সিস্টেম আর্কিটেকচারের বিস্তারিত ইতিহাস `docs/` ফোল্ডারে সংরক্ষিত আছে:
+- 📖 [01. Project Overview & Background](docs/01_PROJECT_OVERVIEW.md)
+- 🚨 [02. Roadblocks & Errors Log (কি কি সমস্যা হয়েছিল ও সমাধান)](docs/02_CHRONOLOGICAL_ERRORS.md)
+- 🏗️ [03. System Architecture & Bridge Protocol](docs/03_SYSTEM_ARCHITECTURE.md)
+- 📱 [04. Android Background & Tmux Execution](docs/04_BACKGROUND_AGENT_GUIDE.md)
+- 🤖 [05. Master Briefing for Future AI Assistants](docs/05_GUIDE_FOR_FUTURE_AI.md)
 
 ---
 
