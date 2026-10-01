@@ -52,8 +52,8 @@ function simplifyTools(tools) {
 function convertAnthropicToOpenAI(parsed) {
     const messages = [];
     
-    // 1. Efficient Lean System Prompt (Eliminates ~12k tokens)
-    const leanSystemPrompt = "You are an expert autonomous Linux & Python developer on Android Termux. Use tools (Bash, etc.) accurately to complete tasks.";
+    // 1. Efficient Lean System Prompt
+    const leanSystemPrompt = "You are an expert autonomous Linux & Python developer on Android Termux. Use tools (Bash, etc.) to complete tasks step by step.";
     messages.push({ role: 'system', content: leanSystemPrompt });
 
     // 2. Messages & Tool Interactions
@@ -69,8 +69,8 @@ function convertAnthropicToOpenAI(parsed) {
                         textParts.push(part.text);
                     } else if (part.type === 'tool_result') {
                         let resultText = typeof part.content === 'string' ? part.content : JSON.stringify(part.content || "");
-                        if (resultText.length > 2500) {
-                            resultText = resultText.substring(0, 2500) + "\n...[output truncated]...";
+                        if (resultText.length > 2000) {
+                            resultText = resultText.substring(0, 2000) + "\n...[truncated]...";
                         }
                         toolResults.push({
                             role: 'tool',
@@ -111,10 +111,106 @@ function convertAnthropicToOpenAI(parsed) {
         messages.push({ role: 'user', content: 'hi' });
     }
 
-    // 3. Compact Tools (Eliminates ~15k verbose documentation tokens down to ~300 tokens!)
     const tools = simplifyTools(parsed.tools);
-
     return { messages, tools };
+}
+
+function sendGroqRequest(apiKey, targetModel, messages, tools, retryCount, res) {
+    const groqPayloadObj = {
+        model: targetModel,
+        messages: messages
+    };
+    if (tools && tools.length > 0) {
+        groqPayloadObj.tools = tools;
+    }
+
+    const groqPayload = JSON.stringify(groqPayloadObj);
+
+    const gReq = https.request({
+        hostname: 'api.groq.com',
+        path: '/openai/v1/chat/completions',
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'User-Agent': 'Groq-Claude-Bridge/1.0',
+            'Content-Length': Buffer.byteLength(groqPayload)
+        }
+    }, (gRes) => {
+        let gData = '';
+        gRes.on('data', c => { gData += c; });
+        gRes.on('end', () => {
+            let gParsed = {};
+            try { gParsed = JSON.parse(gData); } catch(e){}
+            
+            // Check for Rate Limit (HTTP 429) -> Auto Retry!
+            if (gRes.statusCode === 429 && retryCount < 4) {
+                const errMsg = gParsed.error?.message || "";
+                let waitSec = 5;
+                const match = errMsg.match(/try again in ([0-9.]+)s/);
+                if (match) {
+                    waitSec = Math.ceil(parseFloat(match[1])) + 1;
+                }
+                console.log(`⏳ Groq 429 limit hit. Auto-retrying in ${waitSec}s (Attempt ${retryCount + 1}/4)...`);
+                return setTimeout(() => {
+                    sendGroqRequest(apiKey, targetModel, messages, tools, retryCount + 1, res);
+                }, waitSec * 1000);
+            }
+
+            const choice = gParsed.choices?.[0];
+            const content = [];
+            let stop_reason = "end_turn";
+
+            if (choice) {
+                if (choice.message?.content) {
+                    content.push({ type: "text", text: choice.message.content });
+                }
+                if (choice.message?.tool_calls && Array.isArray(choice.message.tool_calls)) {
+                    stop_reason = "tool_use";
+                    for (const tc of choice.message.tool_calls) {
+                        let inputObj = {};
+                        try { inputObj = JSON.parse(tc.function.arguments); } catch(e){ inputObj = { raw: tc.function.arguments }; }
+                        content.push({
+                            type: "tool_use",
+                            id: tc.id,
+                            name: tc.function.name,
+                            input: inputObj
+                        });
+                    }
+                }
+            } else if (gParsed.error) {
+                content.push({ type: "text", text: "Groq Error: " + gParsed.error.message });
+            }
+
+            if (content.length === 0) {
+                content.push({ type: "text", text: "No response received" });
+            }
+
+            const anthropicResp = JSON.stringify({
+                id: "msg_" + Date.now(),
+                type: "message",
+                role: "assistant",
+                content: content,
+                model: targetModel,
+                stop_reason: stop_reason,
+                usage: {
+                    input_tokens: gParsed.usage?.prompt_tokens || 10,
+                    output_tokens: gParsed.usage?.completion_tokens || 20
+                }
+            });
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(anthropicResp);
+        });
+    });
+
+    gReq.on('error', (err) => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+    });
+
+    gReq.write(groqPayload);
+    gReq.end();
 }
 
 const server = http.createServer((req, res) => {
@@ -145,87 +241,7 @@ const server = http.createServer((req, res) => {
         }
 
         const { messages, tools } = convertAnthropicToOpenAI(parsed);
-        const groqPayloadObj = {
-            model: targetModel,
-            messages: messages
-        };
-        if (tools && tools.length > 0) {
-            groqPayloadObj.tools = tools;
-        }
-
-        const groqPayload = JSON.stringify(groqPayloadObj);
-
-        const gReq = https.request({
-            hostname: 'api.groq.com',
-            path: '/openai/v1/chat/completions',
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-                'User-Agent': 'Groq-Claude-Bridge/1.0',
-                'Content-Length': Buffer.byteLength(groqPayload)
-            }
-        }, (gRes) => {
-            let gData = '';
-            gRes.on('data', c => { gData += c; });
-            gRes.on('end', () => {
-                let gParsed = {};
-                try { gParsed = JSON.parse(gData); } catch(e){}
-                
-                const choice = gParsed.choices?.[0];
-                const content = [];
-                let stop_reason = "end_turn";
-
-                if (choice) {
-                    if (choice.message?.content) {
-                        content.push({ type: "text", text: choice.message.content });
-                    }
-                    if (choice.message?.tool_calls && Array.isArray(choice.message.tool_calls)) {
-                        stop_reason = "tool_use";
-                        for (const tc of choice.message.tool_calls) {
-                            let inputObj = {};
-                            try { inputObj = JSON.parse(tc.function.arguments); } catch(e){ inputObj = { raw: tc.function.arguments }; }
-                            content.push({
-                                type: "tool_use",
-                                id: tc.id,
-                                name: tc.function.name,
-                                input: inputObj
-                            });
-                        }
-                    }
-                } else if (gParsed.error) {
-                    content.push({ type: "text", text: "Groq Error: " + gParsed.error.message });
-                }
-
-                if (content.length === 0) {
-                    content.push({ type: "text", text: "No response received" });
-                }
-
-                const anthropicResp = JSON.stringify({
-                    id: "msg_" + Date.now(),
-                    type: "message",
-                    role: "assistant",
-                    content: content,
-                    model: targetModel,
-                    stop_reason: stop_reason,
-                    usage: {
-                        input_tokens: gParsed.usage?.prompt_tokens || 10,
-                        output_tokens: gParsed.usage?.completion_tokens || 20
-                    }
-                });
-
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(anthropicResp);
-            });
-        });
-
-        gReq.on('error', (err) => {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: err.message }));
-        });
-
-        gReq.write(groqPayload);
-        gReq.end();
+        sendGroqRequest(apiKey, targetModel, messages, tools, 0, res);
     });
 });
 
