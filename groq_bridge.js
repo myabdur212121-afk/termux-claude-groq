@@ -56,9 +56,12 @@ function convertAnthropicToOpenAI(parsed) {
     const leanSystemPrompt = "You are an expert autonomous Linux & Python developer on Android Termux. Use tools (Bash, etc.) to complete tasks step by step.";
     messages.push({ role: 'system', content: leanSystemPrompt });
 
-    // 2. Messages & Tool Interactions
+    // 2. Messages & Tool Interactions (Keeps only recent history to prevent token bloat)
     if (parsed.messages && Array.isArray(parsed.messages)) {
-        for (const m of parsed.messages) {
+        // Keep only last 10 messages if history gets huge
+        const recentMessages = parsed.messages.slice(-10);
+
+        for (const m of recentMessages) {
             if (Array.isArray(m.content)) {
                 let textParts = [];
                 let toolResults = [];
@@ -69,8 +72,8 @@ function convertAnthropicToOpenAI(parsed) {
                         textParts.push(part.text);
                     } else if (part.type === 'tool_result') {
                         let resultText = typeof part.content === 'string' ? part.content : JSON.stringify(part.content || "");
-                        if (resultText.length > 2000) {
-                            resultText = resultText.substring(0, 2000) + "\n...[truncated]...";
+                        if (resultText.length > 1500) {
+                            resultText = resultText.substring(0, 1500) + "\n...[truncated]...";
                         }
                         toolResults.push({
                             role: 'tool',
@@ -143,7 +146,7 @@ function sendGroqRequest(apiKey, targetModel, messages, tools, retryCount, res) 
             let gParsed = {};
             try { gParsed = JSON.parse(gData); } catch(e){}
             
-            // Check for Rate Limit (HTTP 429) -> Auto Retry!
+            // Auto Retry on Rate Limit (HTTP 429)
             if (gRes.statusCode === 429 && retryCount < 4) {
                 const errMsg = gParsed.error?.message || "";
                 let waitSec = 5;

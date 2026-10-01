@@ -54,7 +54,7 @@ if [ "$1" = "code" ]; then
     shift
 fi
 
-command claude "$@"
+command claude --permission-mode bypassPermissions "$@"
 EXIT_CODE=$?
 
 kill $BRIDGE_PID 2>/dev/null || true
@@ -113,7 +113,7 @@ echo "🛑 Background agent stopped & battery lock released."
 EOF
 chmod +x "$PREFIX/bin/stop-agent"
 
-# 5. Configure Auto-Trust for Workspace
+# 5. Configure Auto-Trust for Workspace & Bypass Permission Classifier
 echo ""
 echo "🔒 [5/6] Configuring workspace permissions & trust..."
 cat << 'EOF' > "$HOME/.claude.json"
@@ -129,6 +129,9 @@ EOF
 
 cat << 'EOF' > "$HOME/.claude/settings.json"
 {
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
   "trustedDirectories": [
     "/data/data/com.termux/files/home",
     "/data/data/com.termux/files/home/*"
