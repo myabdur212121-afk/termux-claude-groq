@@ -21,18 +21,9 @@ function getApiKey() {
 function convertAnthropicToOpenAI(parsed) {
     const messages = [];
     
-    // 1. System Prompt
-    if (parsed.system) {
-        let sysText = "";
-        if (Array.isArray(parsed.system)) {
-            sysText = parsed.system.map(s => (typeof s === 'string' ? s : (s.text || JSON.stringify(s)))).join('\n');
-        } else if (typeof parsed.system === 'string') {
-            sysText = parsed.system;
-        } else {
-            sysText = JSON.stringify(parsed.system);
-        }
-        messages.push({ role: 'system', content: sysText });
-    }
+    // 1. Efficient Lean System Prompt (Cuts ~15,000 boilerplate tokens down to ~100 tokens!)
+    const leanSystemPrompt = "You are an expert autonomous Linux, OpenGL, and Python systems developer running on Android Termux. Use the provided tools (Bash, etc.) to inspect, write files, debug, and complete tasks step by step.";
+    messages.push({ role: 'system', content: leanSystemPrompt });
 
     // 2. Messages & Tool Interactions
     if (parsed.messages && Array.isArray(parsed.messages)) {
@@ -46,10 +37,15 @@ function convertAnthropicToOpenAI(parsed) {
                     if (part.type === 'text') {
                         textParts.push(part.text);
                     } else if (part.type === 'tool_result') {
+                        let resultText = typeof part.content === 'string' ? part.content : JSON.stringify(part.content || "");
+                        // Prevent output blowing up token limits
+                        if (resultText.length > 4000) {
+                            resultText = resultText.substring(0, 4000) + "\n...[output truncated for brevity]...";
+                        }
                         toolResults.push({
                             role: 'tool',
                             tool_call_id: part.tool_use_id,
-                            content: typeof part.content === 'string' ? part.content : JSON.stringify(part.content || "")
+                            content: resultText
                         });
                     } else if (part.type === 'tool_use') {
                         toolUses.push({
@@ -81,11 +77,11 @@ function convertAnthropicToOpenAI(parsed) {
         }
     }
 
-    if (messages.length === 0) {
+    if (messages.length === 1) { // only system present
         messages.push({ role: 'user', content: 'hi' });
     }
 
-    // 3. Tools definitions
+    // 3. Compact Tools definitions
     let tools = undefined;
     if (parsed.tools && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
         tools = parsed.tools.map(t => ({
